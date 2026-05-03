@@ -19,7 +19,13 @@
  *   - WAL pragma is silently ignored (sql.js doesn't support it).
  */
 
-import initSqlJs, { Database } from 'sql.js';
+// sql.js ships a `browser` field in package.json that points to a non-modular
+// `<script>`-style global. Metro picks that up for web and our default import
+// resolves to `undefined`. Importing the explicit dist path bypasses the
+// browser-field substitution and gives us the proper `module.exports`.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const initSqlJs: typeof import('sql.js').default = require('sql.js/dist/sql-wasm.js');
+import type { Database } from 'sql.js';
 import { MIGRATIONS, SCHEMA_VERSION } from './schema';
 import { SEED_EXERCISES } from '../data/seedExercises';
 import { SEED_FOODS } from '../data/foodCatalog';
