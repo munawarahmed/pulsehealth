@@ -20,12 +20,22 @@
  */
 
 // sql.js ships a `browser` field in package.json that points to a non-modular
-// `<script>`-style global. Metro picks that up for web and our default import
-// resolves to `undefined`. Importing the explicit dist path bypasses the
-// browser-field substitution and gives us the proper `module.exports`.
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const initSqlJs: typeof import('sql.js').default = require('sql.js/dist/sql-wasm.js');
+// `<script>`-style global (`sql-wasm-browser.js`). Metro picks that up for the
+// web target and our default import resolves to `undefined`. Importing the
+// explicit dist path bypasses the browser-field substitution.
+//
+// We must use a static import (not require) so Metro statically traces the
+// dependency and bundles the file. The `as any` is unavoidable because the
+// type defs only describe the package's main entry.
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore — sub-path has no .d.ts; we trust it exports initSqlJs as default.
+import initSqlJsRaw from 'sql.js/dist/sql-wasm.js';
 import type { Database } from 'sql.js';
+
+// The CJS `module.exports = initSqlJs` shows up as either default or the
+// module itself depending on bundler interop. Defensively unwrap.
+const initSqlJs: (config?: any) => Promise<any> =
+  (initSqlJsRaw as any)?.default ?? (initSqlJsRaw as any);
 import { MIGRATIONS, SCHEMA_VERSION } from './schema';
 import { SEED_EXERCISES } from '../data/seedExercises';
 import { SEED_FOODS } from '../data/foodCatalog';
