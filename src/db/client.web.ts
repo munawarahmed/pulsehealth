@@ -133,7 +133,13 @@ function buildShim(db: Database): SQLiteShim {
         db.run('COMMIT');
         persist(db);
       } catch (e) {
-        db.run('ROLLBACK');
+        // SQLite auto-rolls-back the transaction on some errors (constraint
+        // violations, schema errors). A manual ROLLBACK then throws "no
+        // transaction is active" and shadows the original error. Swallow
+        // the rollback failure so the real cause surfaces.
+        try { db.run('ROLLBACK'); } catch { /* tx already closed */ }
+        // eslint-disable-next-line no-console
+        console.error('[withTransactionAsync] failed', e);
         throw e;
       }
     },
