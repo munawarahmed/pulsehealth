@@ -198,6 +198,12 @@ const POST_MIGRATIONS: Record<number, (s: SQLiteShim) => Promise<void>> = {
   },
 };
 
+/** Tables the app expects to exist after migrations are caught up. */
+const REQUIRED_TABLES = [
+  'users', 'workout_logs', 'meals', 'streaks',
+  'exercises', 'food_items', 'badges', 'app_settings',
+] as const;
+
 async function runMigrations(s: SQLiteShim): Promise<void> {
   const row = await s.getFirstAsync<{ user_version: number }>('PRAGMA user_version;');
   const current = row?.user_version ?? 0;
@@ -210,6 +216,25 @@ async function runMigrations(s: SQLiteShim): Promise<void> {
       if (post) await post(s);
       await s.execAsync(`PRAGMA user_version = ${v};`);
     });
+  }
+
+  // Schema integrity check. The migration loop trusts user_version, but a
+  // buggy prior build may have persisted a state where user_version reads
+  // SCHEMA_VERSION while the actual tables are missing (write-mid-tx
+  // corruption). Without this check, the loop returns clean and the app
+  // crashes on the first SELECT. Throwing here triggers getDb()'s self-heal.
+  for (const table of REQUIRED_TABLES) {
+    const found = await s.getFirstAsync<{ name: string }>(
+      `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?;`,
+      [table]
+    );
+    if (!found) {
+      throw new Error(
+        `Schema integrity check failed: missing table "${table}" ` +
+        `(user_version reports ${current >= SCHEMA_VERSION ? 'up-to-date' : current}). ` +
+        `Saved DB will be wiped and rebuilt from seed.`
+      );
+    }
   }
 }
 
