@@ -94,16 +94,23 @@ function persist(db: Database) {
 // ─────────────────────────────────────────────────────────────────────
 
 function buildShim(db: Database): SQLiteShim {
+  // Tracks whether a transaction is active. db.export() during a transaction
+  // captures inconsistent bytes (CREATE TABLE in journal but not committed),
+  // so reloading them yields a DB where tables look missing. We persist only
+  // outside transactions; the transaction's own COMMIT branch handles the
+  // single post-commit persist.
+  let inTx = false;
+
   return {
     async execAsync(sql) {
       // exec() handles multi-statement strings; run() handles single.
       // We use exec for safety since some migrations may concat.
       db.exec(sql);
-      persist(db);
+      if (!inTx) persist(db);
     },
     async runAsync(sql, params = []) {
       db.run(sql, params);
-      persist(db);
+      if (!inTx) persist(db);
     },
     async getFirstAsync<T>(sql: string, params: any[] = []): Promise<T | null> {
       const stmt = db.prepare(sql);
@@ -128,11 +135,15 @@ function buildShim(db: Database): SQLiteShim {
     },
     async withTransactionAsync(fn) {
       db.run('BEGIN');
+      inTx = true;
       try {
         await fn();
         db.run('COMMIT');
+        inTx = false;
+        // Single persist for the whole transaction — atomic with the commit.
         persist(db);
       } catch (e) {
+        inTx = false;
         // SQLite auto-rolls-back the transaction on some errors (constraint
         // violations, schema errors). A manual ROLLBACK then throws "no
         // transaction is active" and shadows the original error. Swallow
@@ -144,6 +155,12 @@ function buildShim(db: Database): SQLiteShim {
       }
     },
   };
+}
+
+function clearSaved(): void {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.removeItem(STORAGE_KEY);
+  } catch { /* best effort */ }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -200,6 +217,14 @@ async function runMigrations(s: SQLiteShim): Promise<void> {
 // Public API
 // ─────────────────────────────────────────────────────────────────────
 
+async function bootstrapWith(SQL: any, bytes: Uint8Array | null): Promise<SQLiteShim> {
+  const db: Database = bytes ? new SQL.Database(bytes) : new SQL.Database();
+  try { db.run('PRAGMA foreign_keys = ON;'); } catch { /* sql.js: ok */ }
+  const shim = buildShim(db);
+  await runMigrations(shim);
+  return shim;
+}
+
 export async function getDb(): Promise<SQLiteShim> {
   if (_shim) return _shim;
   if (_ready) return _ready;
@@ -208,11 +233,25 @@ export async function getDb(): Promise<SQLiteShim> {
     const SQL = await initSqlJs({
       locateFile: (file: string) => `${WASM_CDN}/${file}`,
     });
+
     const saved = loadSavedBytes();
-    const db = saved ? new SQL.Database(saved) : new SQL.Database();
-    try { db.run('PRAGMA foreign_keys = ON;'); } catch { /* sql.js: ok */ }
-    const shim = buildShim(db);
-    await runMigrations(shim);
+    if (saved) {
+      try {
+        const shim = await bootstrapWith(SQL, saved);
+        _shim = shim;
+        return shim;
+      } catch (e) {
+        // Saved bytes are inconsistent (almost always: persisted mid-tx by
+        // a prior buggy build). Wipe and rebuild from scratch — the seed
+        // catalog is the source of truth, no user-authored data is lost
+        // because the only user data was created on this same broken build.
+        // eslint-disable-next-line no-console
+        console.warn('[client.web] saved DB failed migrations; starting fresh', e);
+        clearSaved();
+      }
+    }
+
+    const shim = await bootstrapWith(SQL, null);
     _shim = shim;
     return shim;
   })();
